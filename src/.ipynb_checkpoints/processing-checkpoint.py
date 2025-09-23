@@ -6,7 +6,7 @@ Functions for cleaning and transforming sportsbook odds data.
 
 import pandas as pd
 
-def american_to_prob(odds_df):
+def american_to_prob(odds):
     """
     Convert American odds to implied probability.
     """
