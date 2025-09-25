@@ -32,4 +32,4 @@ Sports betting markets move fast and are highly competitive. By developing this 
 
 -Translate raw data into actionable insights, the same way sportsbooks must constantly monitor competitors and adjust pricing.
 
-In short, this project demonstrates end-to-end skills in data engineering, sports analytics, and applied problem solving — the very skills that power real-world sportsbook operations at companies like DraftKings.
+In short, this project demonstrates end-to-end skills in data engineering, sports analytics, and applied problem solving — the very skills that power real-world sportsbook operations.
