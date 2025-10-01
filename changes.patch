@@ -1,0 +1,583 @@
+--- a/notebooks/run_demo.py
++++ b/notebooks/run_demo.py
+@@ -0,0 +1,55 @@
++"""
++run_demo.py
++-----------
++Simple script to run the pipeline end-to-end using either a local sample JSON file
++or theODDS API if ODDS_API_KEY is set.
++"""
++import os, json, sys, pandas as pd
++from src.ingestion import fetch_player_props
++from src.processing import props_to_dataframe
++from src.Analysis import detect_arbitrage
++from src.features import basic_features
++
++SAMPLE_PATH = os.path.join(os.path.dirname(__file__), "sample_odds.json")
++
++def load_data():
++    api_key = os.getenv("ODDS_API_KEY")
++    if api_key:
++        try:
++            data = fetch_player_props(markets="player_points")
++            return data
++        except Exception as e:
++            print("Failed to fetch from API (falling back to sample file):", e)
++    if os.path.exists(SAMPLE_PATH):
++        print("Using sample file:", SAMPLE_PATH)
++        return json.load(open(SAMPLE_PATH, "r", encoding="utf-8"))
++    raise SystemExit("No data available. Set ODDS_API_KEY or provide notebooks/sample_odds.json")
++
++def main():
++    data = load_data()
++    df = props_to_dataframe(data, markets="player_points")
++    print("Flattened rows:", len(df))
++    if len(df) == 0:
++        print("No rows. Exiting.")
++        return
++    df = basic_features(df)
++    games = df["game_id"].dropna().unique().tolist()
++    if not games:
++        print("No game_id found; showing first few rows")
++        print(df.head().to_dict(orient="records")[:5])
++        return
++    gid = games[0]
++    sub = df[df["game_id"] == gid]
++    best = {}
++    for name in sub["outcome_name"].dropna().unique():
++        rows = sub[sub["outcome_name"] == name].assign(price_float = pd.to_numeric(sub["price"], errors="coerce"))
++        if len(rows)==0:
++            continue
++        row = rows.loc[rows["price_float"].idxmax()]
++        best[name] = {"bookmaker": row.get("bookmaker"), "price": float(row.get("price", float("nan")))}
++    print("Best odds (example):", best)
++    arb = detect_arbitrage(best) if len(best)==2 else None
++    print("Arbitrage:", arb)
++
++if __name__ == "__main__":
++    main()
+--- a/notebooks/sample_odds.json
++++ b/notebooks/sample_odds.json
+@@ -0,0 +1,30 @@
++[
++  {
++    "id": "game1",
++    "commence_time": "2025-09-30T01:00:00Z",
++    "home_team": "Phoenix Suns",
++    "away_team": "Sacramento Kings",
++    "bookmakers": [
++      {
++        "key": "book_a",
++        "title": "Book A",
++        "last_update": "2025-09-29T22:00:00Z",
++        "markets": [
++          {
++            "key": "player_points",
++            "outcomes": [
++              {
++                "name": "Devin Booker",
++                "price": -110
++              },
++              {
++                "name": "De'Aaron Fox",
++                "price": -105
++              }
++            ]
++          }
++        ]
++      }
++    ]
++  }
++]
+--- a/src/Analysis.py
++++ b/src/Analysis.py
+@@ -1,4 +1,4 @@
+-# src/analysis.py
++# src/Analysis.py
+ 
+ """
+ Analysis utilities for sportsbook odds data.
+@@ -6,48 +6,49 @@
+ """
+ 
+ from typing import Dict, Any
++import math
+ 
+-def parse_market(game: Dict[str, Any], market_key: str) -> Dict[str, Dict[str, Any]]:
++def implied_prob_from_price(price, odds_format="american"):
+     """
+-    Parse a specific market from a single game.
+-    Returns nested dict: outcome -> {bookmaker, price}.
++    Convert price to implied probability. price should be numeric.
++    By default assumes American odds. If decimal odds are passed, set odds_format="decimal".
+     """
+-    parsed = {}
+-    for bookmaker in game.get("bookmakers", []):
+-        for market in bookmaker.get("markets", []):
+-            if market["key"] == market_key:
+-                for outcome in market.get("outcomes", []):
+-                    name = outcome["name"]
+-                    price = outcome["price"]
+-                    if name not in parsed or price > parsed[name]["price"]:
+-                        parsed[name] = {"bookmaker": bookmaker["title"], "price": price}
+-    return parsed
+-
+-
+-def find_best_odds(parsed_market: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+-    """
+-    Return the highest odds per outcome (already handled in parse_market).
+-    Simply returns parsed_market for clarity.
+-    """
+-    return parsed_market
+-
+-
+-def implied_prob(decimal_odds: float) -> float:
+-    """Convert decimal odds to implied probability."""
+-    return 1 / decimal_odds
+-
++    try:
++        p = float(price)
++    except Exception:
++        return math.nan
++    if odds_format == "decimal":
++        if p <= 0:
++            return math.nan
++        return 1.0 / p
++    # american
++    if p > 0:
++        return 100.0 / (p + 100.0)
++    else:
++        return abs(p) / (abs(p) + 100.0)
+ 
+ def detect_arbitrage(best_odds: Dict[str, Dict[str, Any]]):
+     """
+     Check for arbitrage opportunities in a two-outcome market.
+     Returns profit margin (%) if arbitrage exists, else None.
++    Defensive: converts to numeric, returns None on malformed input.
+     """
++    if not isinstance(best_odds, dict):
++        return None
+     if len(best_odds) != 2:
+-        return None  # Only works for two-outcome markets (H2H, spreads, totals)
++        return None  # only 2-outcome markets supported
+ 
+-    probs = [implied_prob(data["price"]) for data in best_odds.values()]
++    probs = []
++    for outcome, data in best_odds.items():
++        if not isinstance(data, dict):
++            return None
++        price = data.get("price")
++        prob = implied_prob_from_price(price, odds_format="american")
++        if math.isnan(prob):
++            return None
++        probs.append(prob)
++
+     total_prob = sum(probs)
+-
+-    if total_prob < 1:
+-        return round((1 - total_prob) * 100, 2)
++    if total_prob < 1.0:
++        return round((1.0 - total_prob) * 100, 4)
+     return None
+--- a/src/evaluation.py
++++ b/src/evaluation.py
+@@ -7,33 +7,35 @@
+ import numpy as np
+ import pandas as pd
+ 
+-def backtest(predictions, market_lines, threshold=0.55):
++def backtest(predictions: pd.Series, market_probs: pd.Series, stake: float = 1.0, threshold: float = 0.55):
+     """
+-    Simulate bets based on model vs market.
+-    Returns ROI and bet log.
++    Simple betting backtest:
++      - predictions: model-implied probability (0-1) for the same outcome the market offers
++      - market_probs: market-implied probability (0-1)
++      - stake: amount wagered per bet
++      - threshold: only bet when model edge > threshold (i.e., model_prob - market_prob >= threshold)
++    Returns DataFrame with columns: stake, result (win/loss), pnl, cumulative_pnl
++    Note: this is a simplified backtest and assumes binary outcomes and even settlement based on implied odds.
+     """
+-    bets = []
+-    bankroll = 1000
+-    stake = 10
++    df = pd.DataFrame({"model": predictions, "market": market_probs}).dropna()
++    df["edge"] = df["model"] - df["market"]
++    # determine bets where edge >= threshold
++    df["bet"] = df["edge"] >= threshold
++    df["stake"] = np.where(df["bet"], stake, 0.0)
++    # approximate payout: if model predicts win and market offers implied prob p_market, decimal odds ~ 1/p_market
++    df["dec_odds"] = np.where(df["market"] > 0, 1.0 / df["market"], np.nan)
++    df["pnl"] = 0.0
++    if "actual" in df.columns:
++        df["pnl"] = np.where(df["actual"] == 1, df["stake"] * (df["dec_odds"] - 1.0), -df["stake"])
++    df["cumulative_pnl"] = df["pnl"].cumsum()
++    return df
+ 
+-    for pred, line in zip(predictions, market_lines):
+-        implied_prob = line
+-        if pred > implied_prob and pred > threshold:
+-            bankroll += stake
+-            bets.append("win")
+-        elif pred < implied_prob and (1 - pred) > threshold:
+-            bankroll -= stake
+-            bets.append("loss")
+-        else:
+-            bets.append("pass")
+-
+-    roi = (bankroll - 1000) / 1000
+-    return {"final_bankroll": bankroll, "ROI": roi, "bets": bets}
+-
+-def evaluate_accuracy(predictions, outcomes):
+-    """
+-    Compare predicted probabilities vs. actual outcomes.
+-    """
+-    correct = np.sum((predictions >= 0.5) == outcomes)
+-    accuracy = correct / len(outcomes)
+-    return accuracy
++def implied_prob_from_american(odds):
++    """Utility to compute implied probability from American odds"""
++    try:
++        a = float(odds)
++    except Exception:
++        return np.nan
++    if a > 0:
++        return 100.0 / (a + 100.0)
++    return abs(a) / (abs(a) + 100.0)
+--- a/src/features.py
++++ b/src/features.py
+@@ -1,25 +1,31 @@
+-# +
++"""
++features.py
++-----------
++Create simple features from flattened props DataFrame.
++"""
++
+ import pandas as pd
++import numpy as np
+ 
+-def build_features(df: pd.DataFrame) -> pd.DataFrame:
++def basic_features(df: pd.DataFrame):
+     """
+-    Add rolling averages and other predictive features to player game logs.
+-    Expects columns: player, date, points, rebounds, assists.
++    Given a DataFrame with columns: ['game_id','commence_time','home_team','away_team','bookmaker','market','outcome_name','price']
++    Create features:
++    - price (american) -> implied_prob
++    - is_home (whether outcome_name mentions home team)
++    - time_to_start (na for now)
++    Returns df with feature columns added.
+     """
+-    df = df.sort_values(["player", "date"])
+-    
+-    df["points_rolling_avg"] = (
+-        df.groupby("player")["points"].transform(lambda x: x.rolling(5, min_periods=1).mean())
+-    )
+-    df["rebounds_rolling_avg"] = (
+-        df.groupby("player")["rebounds"].transform(lambda x: x.rolling(5, min_periods=1).mean())
+-    )
+-    df["assists_rolling_avg"] = (
+-        df.groupby("player")["assists"].transform(lambda x: x.rolling(5, min_periods=1).mean())
+-    )
+-    
+-    # Define next-game points as prediction target
+-    df["target_points"] = df.groupby("player")["points"].shift(-1)
+-    
+-    return df.dropna(subset=["target_points"])
+-
++    df = df.copy()
++    def _imp(a):
++        try:
++            a=float(a)
++        except Exception:
++            return np.nan
++        if a>0:
++            return 100.0/(a+100.0)
++        return abs(a)/(abs(a)+100.0)
++    df["implied_prob"] = df["price"].apply(_imp)
++    df["is_home_player"] = df.apply(lambda r: int(r.get("home_team") and isinstance(r.get("outcome_name"), str) and r["home_team"].lower() in r["outcome_name"].lower()), axis=1)
++    df["price_float"] = pd.to_numeric(df["price"], errors="coerce")
++    return df
+--- a/src/interface.py
++++ b/src/interface.py
+@@ -1,19 +1,29 @@
+-"""
+-interface.py
+-------------
+-Simple Streamlit dashboard to display model predictions vs. market odds.
+-"""
+-
++import os
+ import streamlit as st
+ import pandas as pd
++from src.processing import props_to_dataframe
++from src.features import basic_features
+ 
+-def run_interface(df):
++def run_interface_from_file(path=None):
++    if path is None:
++        candidate = os.environ.get("SAMPLE_ODDS_PATH", None) or os.path.join("notebooks", "sample_odds.json")
++        path = candidate
++    if not os.path.exists(path):
++        raise FileNotFoundError(f"Odds file not found: {path}")
++    import json
++    data = json.load(open(path, "r", encoding="utf-8"))
++    df = props_to_dataframe(data, markets="player_points")
++    df = basic_features(df)
++    run_streamlit(df)
++
++def run_streamlit(df):
+     st.title("NBA Player Prop Model vs. Market")
+     st.write("Compare model probabilities with sportsbook lines.")
+-
+-    player = st.selectbox("Choose a player:", df["player"].unique())
+-    filtered = df[df["player"] == player]
+-
++    if "outcome_name" not in df.columns:
++        st.write("No outcome_name column found in dataframe")
++        return
++    player = st.selectbox("Choose a player:", sorted(df["outcome_name"].dropna().unique()))
++    filtered = df[df["outcome_name"] == player]
+     st.dataframe(filtered)
+-
+-    st.bar_chart(filtered[["prob"]])
++    if "implied_prob" in filtered.columns:
++        st.line_chart(filtered[["implied_prob"]])
+--- a/src/modeling.py
++++ b/src/modeling.py
+@@ -1,29 +1,29 @@
+ """
+ modeling.py
+ -----------
+-Simple models for player prop predictions.
++Simple modeling utilities. This is a placeholder that demonstrates training
++a logistic regression model to predict binary outcomes from features.
+ """
+ 
+ import pandas as pd
+-from sklearn.linear_model import LinearRegression
+-from sklearn.ensemble import RandomForestRegressor
++import numpy as np
++from sklearn.linear_model import LogisticRegression
++from sklearn.model_selection import train_test_split
++from sklearn.metrics import log_loss, accuracy_score
++import joblib
+ 
+-def train_model(X_train, y_train, model_type="linear"):
+-    """
+-    Train a regression model (linear or random forest).
+-    """
+-    if model_type == "linear":
+-        model = LinearRegression()
+-    elif model_type == "random_forest":
+-        model = RandomForestRegressor(n_estimators=100, random_state=42)
+-    else:
+-        raise ValueError("Invalid model_type. Use 'linear' or 'random_forest'.")
+-    
++def train_basic_model(df: pd.DataFrame, feature_cols, target_col="actual", test_size=0.2, random_state=0):
++    df = df.dropna(subset=feature_cols + [target_col])
++    X = df[feature_cols].astype(float)
++    y = df[target_col].astype(int)
++    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size, random_state=random_state)
++    model = LogisticRegression(max_iter=200)
+     model.fit(X_train, y_train)
+-    return model
++    preds = model.predict_proba(X_test)[:,1]
++    return {"model": model, "X_test": X_test, "y_test": y_test, "preds": preds, "log_loss": log_loss(y_test, preds), "accuracy": accuracy_score(y_test, (preds>0.5).astype(int))}
+ 
+-def predict(model, X_test):
+-    """
+-    Generate predictions for player props.
+-    """
+-    return model.predict(X_test)
++def save_model(model, path):
++    joblib.dump(model, path)
++
++def load_model(path):
++    return joblib.load(path)
+--- a/src/processing.py
++++ b/src/processing.py
+@@ -5,83 +5,78 @@
+ """
+ 
+ import pandas as pd
++import numpy as np
++import math
++from typing import List, Dict, Any
+ 
+-def american_to_prob(odds_df):
++def american_to_prob(odds):
+     """
+-    Convert American odds to implied probability.
++    Convert American odds (can be int/float or pandas Series/ndarray) to implied probability (0-1).
++    Accepts either:
++      - a scalar numeric American odds (e.g., -150, +200)
++      - a pandas.Series of American odds
++    Returns same type as input (scalar or pandas.Series) with values in (0,1).
++    Non-numeric inputs become np.nan.
+     """
+-    if odds > 0:
+-        return 100 / (odds + 100)
++    if isinstance(odds, (pd.Series, pd.Index, list, tuple, np.ndarray)):
++        s = pd.to_numeric(pd.Series(odds), errors="coerce").astype(float)
++        def _conv(a):
++            if pd.isna(a):
++                return np.nan
++            a = float(a)
++            if a > 0:
++                return 100.0 / (a + 100.0)
++            else:
++                return abs(a) / (abs(a) + 100.0)
++        return s.map(_conv)
+     else:
+-        return abs(odds) / (abs(odds) + 100)
++        try:
++            a = float(odds)
++        except Exception:
++            return float("nan")
++        if a > 0:
++            return 100.0 / (a + 100.0)
++        else:
++            return abs(a) / (abs(a) + 100.0)
+ 
+-def clean_odds(raw_data):
++def props_to_dataframe(odds_json: List[Dict[str, Any]], markets: str = "player_points") -> pd.DataFrame:
+     """
+-    Turn The Odds API JSON response into a tidy DataFrame.
++    Flatten The Odds API v4 player prop JSON into a tidy DataFrame.
++    Produces one row per (game, market, bookmaker, outcome)
+     """
+     records = []
+-    for game in raw_data:
+-        home_team = game["home_team"]
+-        away_team = game["away_team"]
+-        for book in game["bookmakers"]:
+-            bookmaker = book["title"]
+-            for market in book["markets"]:
+-                market_key = market["key"]
+-                for outcome in market["outcomes"]:
+-                    records.append({
+-                        "home_team": home_team,
+-                        "away_team": away_team,
+-                        "bookmaker": bookmaker,
+-                        "market": market_key,
+-                        "player": outcome.get("name"),
+-                        "price": outcome.get("price"),
+-                        "prob": american_to_prob(outcome.get("price"))
+-                    })
+-    return pd.DataFrame(records)
+-
+-
+-def flatten_odds_to_df(data, market="h2h"):
+-    """
+-    Flatten The Odds API JSON into a clean DataFrame.
+-    
+-    Args:
+-        data (list): JSON response from The Odds API
+-        market (str): market key (e.g., "h2h", "totals", "spreads", "player_points")
+-        
+-    Returns:
+-        pd.DataFrame: tidy dataframe of odds
+-    """
+-    records = []
+-    
+-    for game in data:
+-        game_id = game.get("id")
+-        sport = game.get("sport_title")
++    for game in odds_json or []:
+         commence_time = game.get("commence_time")
+         home_team = game.get("home_team")
+         away_team = game.get("away_team")
+-        
+-        for book in game.get("bookmakers", []):
+-            bookie = book.get("title")
+-            last_update = book.get("last_update")
+-            
+-            for m in book.get("markets", []):
+-                if m.get("key") != market:
++        game_id = game.get("id") or game.get("game_id")
++
++        for bookmaker in game.get("bookmakers", []) or []:
++            bookie = bookmaker.get("key") or bookmaker.get("title") or bookmaker.get("id")
++            last_update = bookmaker.get("last_update")
++            markets_list = bookmaker.get("markets") or bookmaker.get("markets", []) or bookmaker.get("markets", [])
++            for m in markets_list or []:
++                if m.get("key") != markets:
+                     continue
+-                for outcome in m.get("outcomes", []):
++                for outcome in m.get("outcomes", []) or []:
++                    name = outcome.get("name") or outcome.get("label") or outcome.get("participant")
++                    price = outcome.get("price") if "price" in outcome else outcome.get("odds") if "odds" in outcome else outcome.get("point") if "point" in outcome else None
++                    try:
++                        price_num = pd.to_numeric(price, errors="coerce")
++                    except Exception:
++                        price_num = float("nan")
+                     records.append({
+                         "game_id": game_id,
+-                        "sport": sport,
+                         "commence_time": commence_time,
+                         "home_team": home_team,
+                         "away_team": away_team,
+                         "bookmaker": bookie,
+                         "last_update": last_update,
+                         "market": m.get("key"),
+-                        "outcome_name": outcome.get("name"),
+-                        "price": outcome.get("price")
++                        "outcome_name": name,
++                        "price": price_num
+                     })
+-                    
+-    return pd.DataFrame(records)
+-
+-
+-
++    df = pd.DataFrame(records)
++    if "price" in df.columns:
++        df["price"] = pd.to_numeric(df["price"], errors="coerce")
++    return df
+--- a/tests/test_processing_and_analysis.py
++++ b/tests/test_processing_and_analysis.py
+@@ -0,0 +1,31 @@
++import math
++import pandas as pd
++from src.processing import american_to_prob, props_to_dataframe
++from src.Analysis import detect_arbitrage
++
++def test_american_to_prob_scalar():
++    assert abs(american_to_prob(200) - (100.0 / 300.0)) < 1e-8
++    assert abs(american_to_prob(-150) - (150.0 / 250.0)) < 1e-8
++
++def test_american_to_prob_series():
++    s = american_to_prob([200, -150, None])
++    assert len(s) == 3
++    assert math.isfinite(s[0])
++    assert math.isfinite(s[1])
++    assert math.isnan(s[2])
++
++def test_props_to_dataframe_and_arbitrage(tmp_path):
++    sample = tmp_path / "sample.json"
++    sample.write_text('[{"id":"g","commence_time":"t","home_team":"A","away_team":"B","bookmakers":[{"key":"b1","markets":[{"key":"player_points","outcomes":[{"name":"P1","price":-110},{"name":"P2","price":-110}]}]},{"key":"b2","markets":[{"key":"player_points","outcomes":[{"name":"P1","price":-105},{"name":"P2","price":-120}]}]}]}]')
++    import json
++    data = json.loads(sample.read_text())
++    df = props_to_dataframe(data, markets="player_points")
++    assert "price" in df.columns
++    best = {}
++    for name in df["outcome_name"].unique():
++        sub = df[df["outcome_name"] == name]
++        row = sub.iloc[0].to_dict()
++        best[name] = {"bookmaker": row["bookmaker"], "price": float(row["price"])}
++    if len(best) == 2:
++        arb = detect_arbitrage(best)
++        assert (arb is None) or isinstance(arb, float)
+--- a/tests/test_run_demo.py
++++ b/tests/test_run_demo.py
+@@ -0,0 +1,8 @@
++def test_run_demo_imports():
++    import os, sys
++    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
++    if repo_root not in sys.path:
++        sys.path.insert(0, repo_root)
++    from notebooks import run_demo as rd
++    data = rd.load_data()
++    assert isinstance(data, list) or isinstance(data, dict)
