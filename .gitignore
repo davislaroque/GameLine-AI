@@ -3,4 +3,5 @@ __pycache__/
 .env
 .DS_Store
 data/
-
+# Python virtual environment
+.venv/
