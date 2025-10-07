@@ -6,7 +6,6 @@ Includes functions to parse markets, find best odds, and detect arbitrage.
 """
 
 from typing import Dict, Any
-import pandas as pd
 
 def parse_market(game: Dict[str, Any], market_key: str) -> Dict[str, Dict[str, Any]]:
     """
@@ -53,6 +52,7 @@ def detect_arbitrage(best_odds: Dict[str, Dict[str, Any]]):
         return round((1 - total_prob) * 100, 2)
     return None
 
+
 def detect_discrepancies(df: pd.DataFrame, market_key: str = "h2h") -> pd.DataFrame:
     """
     Detect arbitrage opportunities across games for a given market.
@@ -68,7 +68,7 @@ def detect_discrepancies(df: pd.DataFrame, market_key: str = "h2h") -> pd.DataFr
 
         # get best odds per outcome
         best_odds = (
-            game_df.groupby("outcome_name")
+            game_df.groupby("outcome")
             .apply(lambda x: x.loc[x["price"].idxmax()])
             .reset_index(drop=True)
         )
@@ -90,12 +90,11 @@ def detect_discrepancies(df: pd.DataFrame, market_key: str = "h2h") -> pd.DataFr
                 "home_team": home,
                 "away_team": away,
                 "market": market_key,
-                "outcome": row["outcome_name"],
+                "outcome": row["outcome"],
                 "best_bookmaker": row["bookmaker"],
                 "best_price": row["price"],
                 "implied_prob": row["implied_prob"],
-                "arbitrage_margin": arb_margin,
-                "devig_prob": row["devig_prob"]
+                "arbitrage_margin": arb_margin
             })
 
     return pd.DataFrame(results)

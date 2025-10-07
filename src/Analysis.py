@@ -51,3 +51,51 @@ def detect_arbitrage(best_odds: Dict[str, Dict[str, Any]]):
     if total_prob < 1:
         return round((1 - total_prob) * 100, 2)
     return None
+
+
+def detect_discrepancies(df: pd.DataFrame, market_key: str = "h2h") -> pd.DataFrame:
+    """
+    Detect arbitrage opportunities across games for a given market.
+    Works for 2-outcome markets (H2H, spreads, totals).
+    """
+
+    df = df[df["market"] == market_key].copy()
+    results = []
+
+    for game_id, game_df in df.groupby("game_id"):
+        home = game_df["home_team"].iloc[0]
+        away = game_df["away_team"].iloc[0]
+
+        # get best odds per outcome
+        best_odds = (
+            game_df.groupby("outcome")
+            .apply(lambda x: x.loc[x["price"].idxmax()])
+            .reset_index(drop=True)
+        )
+
+        # skip if not 2 outcomes
+        if len(best_odds) != 2:
+            continue  
+
+        # compute implied probabilities
+        best_odds["implied_prob"] = best_odds["price"].apply(lambda x: 1/x)
+        total_prob = best_odds["implied_prob"].sum()
+
+        arb_margin = (1 - total_prob) * 100 if total_prob < 1 else None
+
+        # record results for both outcomes
+        for _, row in best_odds.iterrows():
+            results.append({
+                "game_id": game_id,
+                "home_team": home,
+                "away_team": away,
+                "market": market_key,
+                "outcome": row["outcome"],
+                "best_bookmaker": row["bookmaker"],
+                "best_price": row["price"],
+                "implied_prob": row["implied_prob"],
+                "arbitrage_margin": arb_margin
+            })
+
+    return pd.DataFrame(results)
+
