@@ -1,36 +1,38 @@
-  {
-    "sport_key": "basketball_nba",
-    "sport_title": "NBA",
-    "commence_time": "2025-01-01T00:00:00Z",
-    "home_team": "Lakers",
-    "away_team": "Heat",
-    "bookmakers": [
-      {
-        "title": "BookA",
-        "last_update": "2025-01-01T00:00:00Z",
-        "markets": [
-          {
-            "key": "h2h",
-            "outcomes": [
-              {"name": "Lakers", "price": 1.80},
-              {"name": "Heat", "price": 2.05}
-            ]
-          }
-        ]
-      },
-      {
-        "title": "BookB",
-        "last_update": "2025-01-01T00:00:00Z",
-        "markets": [
-          {
-            "key": "h2h",
-            "outcomes": [
-              {"name": "Lakers", "price": 1.85},
-              {"name": "Heat", "price": 2.00}
-            ]
-          }
-        ]
-      }
-    ]
+{
+  "sport_key": "basketball_nba",
+  "sport_title": "NBA",
+  "commence_time": "2025-01-01T00:00:00Z",
+  "home_team": "Lakers",
+  "away_team": "Heat",
+  "bookmakers": [
+    {
+      "title": "BookA",
+      "last_update": "2025-01-01T00:00:00Z",
+      "markets": [
+        {
+          "key": "h2h",
+          "outcomes": [
+            {"name": "Lakers", "price": 1.95},
+            {"name": "Heat", "price": 2.20}
+          ]
+        }
+      ]
+    },
+    {
+      "title": "BookB",
+      "last_update": "2025-01-01T00:00:00Z",
+      "markets": [
+        {
+          "key": "h2h",
+          "outcomes": [
+            {"name": "Lakers", "price": 1.85},
+            {"name": "Heat", "price": 2.00}
+          ]
+        }
+      ]
+    }
+  ]
+}
+
   }
 ]
