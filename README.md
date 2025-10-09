@@ -33,3 +33,13 @@ Sports betting markets move fast and are highly competitive. By developing this 
 -Translate raw data into actionable insights, the same way sportsbooks must constantly monitor competitors and adjust pricing.
 
 In short, this project demonstrates end-to-end skills in data engineering, sports analytics, and applied problem solving — the very skills that power real-world sportsbook operations.
+
+🔑 Quick Start (run the demo)
+1. Install dependencies:
+```bash
+pip install -r requirements.txt
+```
+2. How to run:
+     notebooks/player_prop_demo.ipynb in Jupyter and Run → Run All Cells,
+   Or run headlessly:
+     jupyter nbconvert --ExecutePreprocessor.timeout=600 --to notebook --execute notebooks/player_prop_demo.ipynb --output notebooks/player_prop_demo.ran.ipynb
